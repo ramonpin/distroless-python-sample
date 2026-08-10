@@ -53,12 +53,46 @@ test-deps:
     '
     echo "OK: interprete y dependencias"
 
+# Comprueba que la poda del Dockerfile no ha roto la biblioteca estándar.
+test-stdlib:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker run --rm --entrypoint /opt/tools/pepe/bin/python {{IMAGE}}:{{TAG}} -c '
+    import importlib
+    modulos = ["venv", "pydoc", "sqlite3", "ssl", "ctypes", "multiprocessing",
+               "asyncio", "xml.etree.ElementTree", "concurrent.futures",
+               "http.server", "logging.handlers", "pickle", "socket",
+               "subprocess", "tempfile", "uuid", "zoneinfo", "decimal",
+               "lzma", "bz2", "zlib", "hashlib", "email", "unittest"]
+    roto = []
+    for m in modulos:
+        try:
+            importlib.import_module(m)
+        except Exception as e:
+            roto.append(f"{m}: {type(e).__name__}: {e}")
+    if roto:
+        raise SystemExit("modulos rotos por la poda:\n" + "\n".join(roto))
+    print(f"{len(modulos)} modulos importados sin error")
+    '
+    echo "OK: biblioteca estandar intacta"
+
 # Ejecuta todas las comprobaciones. Requiere red para test-deps.
-test: test-entrypoint test-deps
+test: test-entrypoint test-deps test-stdlib
     @echo "OK: todas las comprobaciones"
 
 # Construye y comprueba de una pasada.
 verify: build test
+
+# Construye sin la poda de tamaño, para comparar.
+build-unpruned:
+    docker build \
+        --build-arg PYTHON_VERSION={{PYTHON_VERSION}} \
+        --build-arg PRUNE=0 \
+        -t {{IMAGE}}:unpruned .
+
+# Compara el tamaño con y sin poda.
+compare: build build-unpruned
+    @docker images {{IMAGE}} --format '{{{{.Tag}}\t{{{{.Size}}' | grep -E 'latest|unpruned'
 
 # Muestra el tamaño de la imagen y sus capas.
 size:

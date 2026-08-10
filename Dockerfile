@@ -37,6 +37,45 @@ COPY pyproject.toml uv.lock main.py ./
 # en /opt/bin/pepe.
 RUN uv tool install --python "${PYTHON_VERSION}" --no-cache .
 
+# Poda de lo que no se usa en tiempo de ejecución. Se hace aquí, antes de las
+# copias, para que la imagen final nunca contenga estos archivos.
+#
+# libpython3.13.so.1.0 (33 MB) es el mayor ahorro: es una segunda copia
+# completa del intérprete, destinada a embeber Python en otro programa. El
+# binario bin/python3.13 no la enlaza (no aparece en su 'ldd') y ningún módulo
+# de lib-dynload la necesita, así que sobra. Compruébalo con:
+#     docker run --rm --entrypoint /bin/sh pepe:builder -c 'ldd /opt/python/*/bin/python3.13'
+#
+# Nota: los builds actuales de uv ya vienen sin el directorio 'test/' de la
+# biblioteca estándar, por eso no aparece aquí.
+# Qué se elimina y por qué:
+#   libpython*.so    copia del intérprete, solo útil para embeberlo
+#   tcl/tk, tkinter  interfaz gráfica: no hay servidor X
+#   ensurepip, pip   la imagen final es inmutable
+#   include, *.a     solo hacen falta para compilar extensiones
+#   share/terminfo   no hay terminal interactiva
+ARG PRUNE=1
+RUN set -eu; \
+    if [ "${PRUNE}" != "1" ]; then echo "poda omitida"; exit 0; fi; \
+    PY_ROOT="$(dirname "$(dirname "$(readlink -f /opt/tools/pepe/bin/python)")")"; \
+    cd "${PY_ROOT}"; \
+    rm -f lib/libpython3.13.so.1.0 lib/libpython3.so; \
+    rm -rf lib/tcl* lib/tk* lib/thread* lib/itcl* \
+           lib/libtcl* lib/libtk* \
+           lib/python3.13/tkinter lib/python3.13/idlelib \
+           lib/python3.13/turtledemo lib/python3.13/lib-dynload/_tkinter*.so \
+           bin/idle*; \
+    rm -rf lib/python3.13/ensurepip bin/pip*; \
+    rm -rf include share/man lib/pkgconfig lib/python3.13/config-*; \
+    find . -name '*.a' -delete; \
+    rm -rf share/terminfo
+
+# Comprobación en la propia etapa de construcción: si la poda se hubiera
+# llevado algo imprescindible, la construcción falla aquí en lugar de producir
+# una imagen rota. Se importan los módulos que el proyecto usa de verdad.
+RUN /opt/bin/pepe \
+    && /opt/tools/pepe/bin/python -c "import ssl, httpx, encodings, sysconfig; print('poda verificada')"
+
 ##############################################
 # Etapa 2: imagen final distroless
 ##############################################

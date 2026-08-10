@@ -42,6 +42,8 @@ just build     # construye la imagen pepe:latest
 just run       # la ejecuta -> "Hola mundo!!"
 just test      # comprueba la imagen (requiere red)
 just verify    # construye y comprueba de una pasada
+just size      # tamaño y desglose por capas
+just compare   # tamaño con y sin la poda
 just --list    # todas las recetas disponibles
 ```
 
@@ -95,12 +97,14 @@ existe.
 
 ## Sobre las comprobaciones
 
-`just test` ejecuta dos recetas, y la distinción importa:
+`just test` ejecuta tres recetas, y la distinción importa:
 
 - `test-entrypoint` comprueba que el contenedor arranca y que imprime lo
   esperado.
 - `test-deps` importa `httpx`, consulta la versión de OpenSSL y realiza una
   petición HTTPS real.
+- `test-stdlib` importa 24 módulos de la biblioteca estándar, para detectar si
+  la poda de tamaño se ha llevado algo necesario.
 
 La segunda es la que valida de verdad la imagen distroless. `main.py` importa
 `httpx` pero nunca lo usa, así que el punto de entrada pasaría igualmente
@@ -110,13 +114,52 @@ requiere acceso a la red; para comprobar sin red, usa `just test-entrypoint`.
 
 ## Tamaño de la imagen
 
-Unos 143 MB, de los cuales ~116 MB son el intérprete y su biblioteca estándar
-en `/opt/python`. Si el tamaño fuese una prioridad, la vía con más margen es
-podar `test/`, `idlelib/`, `tkinter/` y los archivos `.a` de esa ruta durante la
-etapa de construcción, lo que la deja en torno a 90–100 MB. Este ejemplo no lo
-hace: prioriza que el Dockerfile se lea con claridad.
+Unos **90 MB**, frente a los 143 MB que ocupa sin podar. Casi todo lo que queda
+es el intérprete y su biblioteca estándar en `/opt/python`.
 
-Usa `just size` para ver el desglose por capas.
+La poda va en la primera etapa del `Dockerfile`, antes de las copias, y se puede
+desactivar con `--build-arg PRUNE=0` (o `just build-unpruned`). Reparto del
+ahorro, medido sobre esta imagen:
+
+| Eliminado                        | Ahorro | Motivo                              |
+| -------------------------------- | -----: | ----------------------------------- |
+| `lib/libpython3.13.so.1.0`       |  33 MB | Copia para embeber Python           |
+| `tcl/tk`, `tkinter`, `idlelib`   |  13 MB | Interfaz gráfica: no hay servidor X |
+| `share/terminfo`                 |   8 MB | No hay terminal interactiva         |
+| `include/`, `.a`, `config-*`     |   4 MB | Solo para compilar extensiones      |
+| `ensurepip`, `pip`               |   2 MB | La imagen final es inmutable        |
+
+El grande merece explicación: `libpython3.13.so.1.0` es una **segunda copia
+completa** del intérprete, pensada para embeber Python en otro programa. El
+binario `bin/python3.13` no la enlaza y ningún módulo de `lib-dynload` la
+necesita. Se comprueba así:
+
+```sh
+docker build --target builder -t pepe:builder .
+docker run --rm --entrypoint /bin/sh pepe:builder \
+    -c 'ldd /opt/python/*/bin/python3.13'   # libpython no aparece
+```
+
+Podar un intérprete es exactamente el tipo de cambio que rompe cosas en
+producción y no en el arranque, así que hay dos redes de seguridad: el
+`Dockerfile` importa `ssl`, `httpx` y `sysconfig` en la propia etapa de
+construcción (si la poda se llevara algo imprescindible, falla la construcción,
+no el despliegue), y `just test-stdlib` importa 24 módulos de la biblioteca
+estándar sobre la imagen final.
+
+Usa `just size` para el desglose por capas y `just compare` para ver las dos
+variantes juntas.
+
+### Lo que no hace falta podar
+
+Los builds actuales de `uv` ya vienen sin el directorio `test/` de la
+biblioteca estándar ni `lib2to3`, y los archivos `.a` apenas suman 1 MB. Si
+buscas recortar más, mídelo antes en lugar de copiar recetas genéricas:
+
+```sh
+docker run --rm --entrypoint /bin/sh pepe:builder \
+    -c 'cd /opt/python/*/ && du -sm ./* && du -sm lib/* | sort -rn | head'
+```
 
 ## Adaptarlo a otro proyecto
 
