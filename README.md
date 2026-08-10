@@ -1,189 +1,184 @@
 # pepe
 
-Proyecto de ejemplo que muestra cómo empaquetar una herramienta de línea de
-comandos escrita en Python dentro de una imagen Docker **distroless**, usando
-[`uv`](https://docs.astral.sh/uv/) tanto para instalar el intérprete como para
-instalar el propio proyecto como herramienta.
+Example project showing how to package a Python command-line tool into a
+**distroless** Docker image, using [`uv`](https://docs.astral.sh/uv/) both to
+install the interpreter and to install the project itself as a tool.
 
-El programa en sí es deliberadamente trivial —imprime `Hola mundo!!`—: lo
-interesante aquí es la construcción de la imagen, no el código.
+The program is deliberately trivial — it prints `Hello world!!` — because the
+interesting part here is how the image is built, not the code.
 
-## Qué demuestra
+## What it demonstrates
 
-- Instalar una versión concreta de Python con `uv python install`, sin depender
-  del intérprete del sistema.
-- Instalar el proyecto como herramienta ejecutable con `uv tool install`.
-- Trasladar ambas instalaciones a una imagen final limpia mediante una
-  construcción Docker en dos etapas, sin gestor de paquetes, sin shell y sin
-  `uv` en el resultado.
+- Installing a specific Python version with `uv python install`, without
+  relying on a system interpreter.
+- Installing the project as an executable tool with `uv tool install`.
+- Moving both installations into a clean final image via a two-stage Docker
+  build, leaving no package manager, no shell and no `uv` in the result.
 
-## Estructura
+## Layout
 
-| Archivo          | Contenido                                                        |
-| ---------------- | ---------------------------------------------------------------- |
-| `main.py`        | El programa: una función `main()` que imprime un saludo.         |
-| `pyproject.toml` | Metadatos, dependencia de `httpx` y el script `pepe = main:main`. |
-| `uv.lock`        | Versiones exactas resueltas por `uv`.                            |
-| `Dockerfile`     | Construcción en dos etapas hacia una imagen distroless.          |
-| `justfile`       | Recetas para construir, comprobar y limpiar.                     |
-| `.dockerignore`  | Excluye `.venv/` y otros artefactos del contexto de construcción. |
-| `README.md`      | Este documento.                                                  |
+| File             | Contents                                                       |
+| ---------------- | -------------------------------------------------------------- |
+| `main.py`        | The program: a `main()` function that prints a greeting.       |
+| `pyproject.toml` | Metadata, the `httpx` dependency and the `pepe = main:main` script. |
+| `uv.lock`        | Exact versions resolved by `uv`.                               |
+| `Dockerfile`     | Two-stage build targeting a distroless image.                  |
+| `justfile`       | Recipes to build, check and clean up.                          |
+| `.dockerignore`  | Keeps `.venv/` and other artifacts out of the build context.   |
+| `README.md`      | This document.                                                 |
 
-## Requisitos
+## Requirements
 
-- Docker con BuildKit (cualquier versión reciente lo trae activado).
-- [`just`](https://github.com/casey/just), opcional, para las recetas.
-- No hace falta tener Python ni `uv` instalados en el equipo: la construcción
-  los aporta.
+- Docker with BuildKit (enabled by default in any recent version).
+- [`just`](https://github.com/casey/just), optional, for the recipes.
+- No local Python or `uv` installation needed: the build provides them.
 
-## Uso
+## Usage
 
 ```sh
-just build     # construye la imagen pepe:latest
-just run       # la ejecuta -> "Hola mundo!!"
-just test      # comprueba la imagen (requiere red)
-just verify    # construye y comprueba de una pasada
-just size      # tamaño y desglose por capas
-just compare   # tamaño con y sin la poda
-just clean     # borra las imágenes del proyecto
-just --list    # todas las recetas disponibles
+just build     # build the pepe:latest image
+just run       # run it -> "Hello world!!"
+just test      # check the image (requires network access)
+just verify    # build and check in one go
+just size      # size and per-layer breakdown
+just compare   # size with and without pruning
+just clean     # remove the project's images
+just --list    # all available recipes
 ```
 
-`just clean` descubre las imágenes por repositorio, así que se lleva todas las
-etiquetas que generan las recetas (`latest`, `builder`, `unpruned`) sin tener
-que enumerarlas. No toca imágenes de otros proyectos, ni siquiera con nombres
-parecidos como `pepe-otro`.
+`just clean` discovers images by repository, so it removes every tag the
+recipes produce (`latest`, `builder`, `unpruned`) without having to enumerate
+them. It leaves other projects' images alone, even similarly named ones such as
+`pepe-other`.
 
-Existe también `just clean-all`, pero conviene saber qué hace antes de usarla:
-además de las imágenes, borra la caché de construcción de BuildKit **de todos
-los proyectos del equipo**, no solo la de este. No es una limitación de la
-receta, sino de BuildKit: la caché se indexa por hash de capa, sin vínculo con
-un repositorio, y las capas de las imágenes base se comparten entre proyectos.
-Por eso la receta muestra cuánto espacio está en juego y pide confirmación
-explícita. Si solo quieres dejar limpio este proyecto, usa `just clean`.
+There is also `just clean-all`, but it's worth knowing what it does before
+reaching for it: on top of the images, it clears the BuildKit build cache for
+**every project on the machine**, not just this one. That isn't a shortcoming
+of the recipe but of BuildKit: the cache is indexed by layer hash with no link
+to a repository, and base-image layers are shared across projects. That's why
+the recipe reports how much space is at stake and asks for explicit
+confirmation. To clean up only this project, use `just clean`.
 
-Sin `just`:
+Without `just`:
 
 ```sh
 docker build -t pepe:latest .
 docker run --rm pepe:latest
 ```
 
-## Cómo funciona la construcción
+## How the build works
 
-### Etapa 1 — construcción (`debian:bookworm-slim`)
+### Stage 1 — build (`debian:bookworm-slim`)
 
-`uv` se copia desde su imagen oficial con la versión fijada, en lugar de
-descargarlo con `curl`, para que la construcción sea reproducible y no dependa
-de la red ni de certificados.
+`uv` is copied from its official image at a pinned version rather than
+downloaded with `curl`, so the build is reproducible and needs neither network
+access nor certificates.
 
-Tres variables de entorno colocan cada cosa en una ruta conocida, que es lo que
-permite copiarlas después:
+Three environment variables put each piece at a known path, which is what makes
+them copyable later:
 
-| Variable                 | Ruta          | Contenido                         |
-| ------------------------ | ------------- | --------------------------------- |
-| `UV_PYTHON_INSTALL_DIR`  | `/opt/python` | El intérprete                     |
-| `UV_TOOL_DIR`            | `/opt/tools`  | El entorno virtual de la herramienta |
-| `UV_TOOL_BIN_DIR`        | `/opt/bin`    | El lanzador ejecutable            |
+| Variable                | Path          | Contents                    |
+| ----------------------- | ------------- | --------------------------- |
+| `UV_PYTHON_INSTALL_DIR` | `/opt/python` | The interpreter             |
+| `UV_TOOL_DIR`           | `/opt/tools`  | The tool's virtual environment |
+| `UV_TOOL_BIN_DIR`       | `/opt/bin`    | The executable launcher     |
 
-Después, `uv python install` trae la versión indicada y `uv tool install .`
-instala el proyecto con sus dependencias en ese entorno.
+`uv python install` then fetches the requested version, and `uv tool install .`
+installs the project with its dependencies into that environment.
 
-### Etapa 2 — imagen final (`gcr.io/distroless/cc-debian12:nonroot`)
+### Stage 2 — final image (`gcr.io/distroless/cc-debian12:nonroot`)
 
-Se copian las tres rutas anteriores, se añade `/opt/bin` al `PATH` y el
-`ENTRYPOINT` apunta al lanzador. El resultado no contiene `uv`, ni gestor de
-paquetes, ni shell, y se ejecuta como usuario sin privilegios.
+The three paths above are copied over, `/opt/bin` is added to `PATH`, and
+`ENTRYPOINT` points at the launcher. The result contains no `uv`, no package
+manager and no shell, and runs as an unprivileged user.
 
-## Dos detalles que explican las decisiones tomadas
+## Two details behind the choices made
 
-**La base es `cc-debian12`, no `static`.** El Python que instala `uv` proviene
-de [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
-y está enlazado dinámicamente contra glibc y libssl. Sobre
-`gcr.io/distroless/static` no arrancaría. La variante `cc` aporta glibc, libgcc
-y libssl, y es la imagen distroless más pequeña que sirve. Por el mismo motivo
-la etapa de construcción es `bookworm-slim`: así el ABI de glibc coincide en
-origen y destino.
+**The base is `cc-debian12`, not `static`.** The Python that `uv` installs comes
+from [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+and is dynamically linked against glibc and libssl. It would not start on
+`gcr.io/distroless/static`. The `cc` variant provides glibc, libgcc and libssl,
+and is the smallest distroless image that works. For the same reason the build
+stage is `bookworm-slim`: that way the glibc ABI matches on both ends.
 
-**El punto de entrada funciona sin shell.** `/opt/bin/pepe` es un script con
-shebang, pero ese shebang apunta directamente al Python del entorno virtual, de
-modo que lo resuelve el kernel. No se necesita `sh`, que en distroless no
-existe.
+**The entry point works without a shell.** `/opt/bin/pepe` is a script with a
+shebang, but that shebang points straight at the virtual environment's Python,
+so the kernel resolves it. No `sh` is required — and distroless has none.
 
-## Sobre las comprobaciones
+## About the checks
 
-`just test` ejecuta tres recetas, y la distinción importa:
+`just test` runs three recipes, and the distinction matters:
 
-- `test-entrypoint` comprueba que el contenedor arranca y que imprime lo
-  esperado.
-- `test-deps` importa `httpx`, consulta la versión de OpenSSL y realiza una
-  petición HTTPS real.
-- `test-stdlib` importa 24 módulos de la biblioteca estándar, para detectar si
-  la poda de tamaño se ha llevado algo necesario.
+- `test-entrypoint` checks that the container starts and prints what's
+  expected.
+- `test-deps` imports `httpx`, reads the OpenSSL version and makes a real HTTPS
+  request.
+- `test-stdlib` imports 24 standard-library modules, to catch whether the size
+  pruning removed something needed.
 
-La segunda es la que valida de verdad la imagen distroless. `main.py` importa
-`httpx` pero nunca lo usa, así que el punto de entrada pasaría igualmente
-aunque faltara una biblioteca dinámica o los certificados del sistema:
-justamente el riesgo de copiar un intérprete entre imágenes. `test-deps`
-requiere acceso a la red; para comprobar sin red, usa `just test-entrypoint`.
+The second one is what actually validates the distroless image. `main.py`
+imports `httpx` but never uses it, so the entry point would pass even with a
+missing shared library or missing system certificates — precisely the risk of
+copying an interpreter between images. `test-deps` needs network access; to
+check without it, use `just test-entrypoint`.
 
-## Tamaño de la imagen
+## Image size
 
-Unos **90 MB**, frente a los 143 MB que ocupa sin podar. Casi todo lo que queda
-es el intérprete y su biblioteca estándar en `/opt/python`, que pasa de 123 MB a
-66 MB.
+About **90 MB**, down from 143 MB unpruned. Almost all of what remains is the
+interpreter and its standard library under `/opt/python`, which goes from
+123 MB to 66 MB.
 
-La poda va en la primera etapa del `Dockerfile`, antes de las copias, y se puede
-desactivar con `--build-arg PRUNE=0` (o `just build-unpruned`). Reparto del
-ahorro, medido sobre esta imagen:
+Pruning happens in the `Dockerfile`'s first stage, before the copies, and can be
+disabled with `--build-arg PRUNE=0` (or `just build-unpruned`). Where the
+savings come from, as measured on this image:
 
-| Eliminado                        | Ahorro | Motivo                              |
-| -------------------------------- | -----: | ----------------------------------- |
-| `lib/libpython3.13.so.1.0`       |  33 MB | Copia para embeber Python           |
-| `tcl/tk`, `tkinter`, `idlelib`   |  13 MB | Interfaz gráfica: no hay servidor X |
-| `share/terminfo`                 |   8 MB | No hay terminal interactiva         |
-| `include/`, `.a`, `config-*`     |   4 MB | Solo para compilar extensiones      |
-| `share/man`, `pkgconfig`         |  ~1 MB | Documentación y metadatos de enlace |
-| `ensurepip`, `pip`               |   2 MB | La imagen final es inmutable        |
+| Removed                        | Saved | Reason                             |
+| ------------------------------ | ----: | ---------------------------------- |
+| `lib/libpython3.13.so.1.0`     | 33 MB | Copy for embedding Python          |
+| `tcl/tk`, `tkinter`, `idlelib`  | 13 MB | GUI toolkit: there is no X server  |
+| `share/terminfo`               |  8 MB | No interactive terminal            |
+| `include/`, `.a`, `config-*`   |  4 MB | Only needed to compile extensions  |
+| `ensurepip`, `pip`             |  2 MB | The final image is immutable       |
+| `share/man`, `pkgconfig`       | ~1 MB | Documentation and linker metadata  |
 
-El grande merece explicación: `libpython3.13.so.1.0` es una **segunda copia
-completa** del intérprete, pensada para embeber Python en otro programa. El
-binario `bin/python3.13` no la enlaza y ningún módulo de `lib-dynload` la
-necesita. Se comprueba así:
+The big one deserves an explanation: `libpython3.13.so.1.0` is a **second full
+copy** of the interpreter, meant for embedding Python into another program. The
+`bin/python3.13` binary does not link against it, and no `lib-dynload` module
+needs it. You can verify that:
 
 ```sh
 docker build --target builder -t pepe:builder .
 docker run --rm --entrypoint /bin/sh pepe:builder \
-    -c 'ldd /opt/python/*/bin/python3.13'   # libpython no aparece
+    -c 'ldd /opt/python/*/bin/python3.13'   # libpython does not appear
 ```
 
-Podar un intérprete es exactamente el tipo de cambio que rompe cosas en
-producción y no en el arranque, así que hay dos redes de seguridad: el
-`Dockerfile` importa `ssl`, `httpx` y `sysconfig` en la propia etapa de
-construcción (si la poda se llevara algo imprescindible, falla la construcción,
-no el despliegue), y `just test-stdlib` importa 24 módulos de la biblioteca
-estándar sobre la imagen final.
+Pruning an interpreter is exactly the kind of change that breaks things in
+production rather than at startup, so there are two safety nets: the
+`Dockerfile` imports `ssl`, `httpx` and `sysconfig` during the build stage
+itself (if pruning removed something essential, the build fails instead of the
+deployment), and `just test-stdlib` imports 24 standard-library modules against
+the final image.
 
-Usa `just size` para el desglose por capas y `just compare` para ver las dos
-variantes juntas.
+Use `just size` for the per-layer breakdown and `just compare` to see both
+variants side by side.
 
-### Lo que no hace falta podar
+### What does not need pruning
 
-Los builds actuales de `uv` ya vienen sin el directorio `test/` de la
-biblioteca estándar ni `lib2to3`, y los archivos `.a` apenas suman 1 MB. Si
-buscas recortar más, mídelo antes en lugar de copiar recetas genéricas:
+Current `uv` builds already ship without the standard library's `test/`
+directory and without `lib2to3`, and the `.a` files add up to barely 1 MB. If
+you want to trim further, measure first instead of copying generic recipes:
 
 ```sh
 docker run --rm --entrypoint /bin/sh pepe:builder \
     -c 'cd /opt/python/*/ && du -sm ./* && du -sm lib/* | sort -rn | head'
 ```
 
-## Adaptarlo a otro proyecto
+## Adapting it to another project
 
-1. Cambia `name` y el script de `[project.scripts]` en `pyproject.toml`; el
-   `ENTRYPOINT` y la ruta de `test-deps` usan ese nombre.
-2. Ajusta `PYTHON_VERSION` en el `justfile` (se propaga al `Dockerfile` como
-   `--build-arg`).
-3. Si tus dependencias incluyen extensiones compiladas, añade en la primera
-   etapa las cabeceras necesarias para construirlas; la imagen final no las
-   necesita, porque solo recibe el resultado.
+1. Change `name` and the `[project.scripts]` entry in `pyproject.toml`; the
+   `ENTRYPOINT` and the `test-deps` path both use that name.
+2. Adjust `PYTHON_VERSION` in the `justfile` (it propagates to the `Dockerfile`
+   as a `--build-arg`).
+3. If your dependencies include compiled extensions, add the headers needed to
+   build them to the first stage; the final image doesn't need them, since it
+   only receives the result.

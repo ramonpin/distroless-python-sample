@@ -1,21 +1,21 @@
 # syntax=docker/dockerfile:1
 
 ##############################################
-# Etapa 1: construcción
+# Stage 1: build
 ##############################################
-# Se usa bookworm-slim porque comparte glibc con la imagen distroless
-# cc-debian12 de la etapa final: el Python que instala 'uv' está enlazado
-# dinámicamente y debe encontrar el mismo ABI en destino.
+# bookworm-slim is used because it shares glibc with the cc-debian12 distroless
+# image of the final stage: the Python that 'uv' installs is dynamically linked
+# and must find the same ABI at the destination.
 FROM debian:bookworm-slim AS builder
 
-# 'uv' se copia desde su imagen oficial en lugar de descargarlo con curl:
-# es reproducible (versión fijada) y no requiere red ni certificados.
+# 'uv' is copied from its official image instead of downloaded with curl:
+# reproducible (pinned version) and needs neither network nor certificates.
 COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /usr/local/bin/uv
 
-# UV_PYTHON_INSTALL_DIR: ubicación conocida y copiable de los intérpretes.
-# UV_TOOL_DIR:           ubicación del entorno virtual de la herramienta.
-# UV_TOOL_BIN_DIR:       ubicación de los lanzadores ejecutables.
-# UV_PYTHON_INSTALL_MIRROR no se toca; se usa el índice por defecto.
+# UV_PYTHON_INSTALL_DIR: known, copyable location for the interpreters.
+# UV_TOOL_DIR:           location of the tool's virtual environment.
+# UV_TOOL_BIN_DIR:       location of the executable launchers.
+# UV_PYTHON_INSTALL_MIRROR is left alone; the default index is used.
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_TOOL_DIR=/opt/tools \
     UV_TOOL_BIN_DIR=/opt/bin \
@@ -23,40 +23,41 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=manual
 
-# Versión de Python fijada explícitamente para que la imagen sea reproducible
-# y para conocer la ruta exacta que hay que copiar en la etapa final.
+# The Python version is pinned explicitly so the image is reproducible and so we
+# know the exact path to copy in the final stage.
 ARG PYTHON_VERSION=3.13.7
 RUN uv python install "${PYTHON_VERSION}"
 
 WORKDIR /src
 COPY pyproject.toml uv.lock main.py ./
 
-# --python: fuerza el uso del intérprete gestionado que acabamos de instalar,
-#           no uno del sistema (que no existe en la imagen final).
-# El entorno de la herramienta queda en /opt/tools/pepe y su lanzador
-# en /opt/bin/pepe.
+# --python: forces the managed interpreter we just installed to be used, not a
+#           system one (which does not exist in the final image).
+# The tool environment ends up in /opt/tools/pepe and its launcher in
+# /opt/bin/pepe.
 RUN uv tool install --python "${PYTHON_VERSION}" --no-cache .
 
-# Poda de lo que no se usa en tiempo de ejecución. Se hace aquí, antes de las
-# copias, para que la imagen final nunca contenga estos archivos.
+# Prune what is unused at runtime. Done here, before the copies, so the final
+# image never contains these files at all.
 #
-# libpython3.13.so.1.0 (33 MB) es el mayor ahorro: es una segunda copia
-# completa del intérprete, destinada a embeber Python en otro programa. El
-# binario bin/python3.13 no la enlaza (no aparece en su 'ldd') y ningún módulo
-# de lib-dynload la necesita, así que sobra. Compruébalo con:
+# What is removed and why:
+#   libpython*.so    a copy of the interpreter, only useful for embedding it
+#   tcl/tk, tkinter  GUI toolkit: there is no X server
+#   ensurepip, pip   the final image is immutable
+#   include, *.a     only needed to compile extensions
+#   share/terminfo   there is no interactive terminal
+#
+# libpython3.13.so.1.0 (33 MB) is the single biggest saving: it is a second full
+# copy of the interpreter, meant for embedding Python into another program. The
+# bin/python3.13 binary does not link against it (it is absent from its 'ldd')
+# and no lib-dynload module needs it, so it is dead weight. Verify with:
 #     docker run --rm --entrypoint /bin/sh pepe:builder -c 'ldd /opt/python/*/bin/python3.13'
 #
-# Nota: los builds actuales de uv ya vienen sin el directorio 'test/' de la
-# biblioteca estándar, por eso no aparece aquí.
-# Qué se elimina y por qué:
-#   libpython*.so    copia del intérprete, solo útil para embeberlo
-#   tcl/tk, tkinter  interfaz gráfica: no hay servidor X
-#   ensurepip, pip   la imagen final es inmutable
-#   include, *.a     solo hacen falta para compilar extensiones
-#   share/terminfo   no hay terminal interactiva
+# Note: current uv builds already ship without the standard library's 'test/'
+# directory, which is why it does not appear here.
 ARG PRUNE=1
 RUN set -eu; \
-    if [ "${PRUNE}" != "1" ]; then echo "poda omitida"; exit 0; fi; \
+    if [ "${PRUNE}" != "1" ]; then echo "pruning skipped"; exit 0; fi; \
     PY_ROOT="$(dirname "$(dirname "$(readlink -f /opt/tools/pepe/bin/python)")")"; \
     cd "${PY_ROOT}"; \
     rm -f lib/libpython3*.so lib/libpython3*.so.*; \
@@ -70,29 +71,29 @@ RUN set -eu; \
     find . -name '*.a' -delete; \
     rm -rf share/terminfo
 
-# Comprobación en la propia etapa de construcción: si la poda se hubiera
-# llevado algo imprescindible, la construcción falla aquí en lugar de producir
-# una imagen rota. Se importan los módulos que el proyecto usa de verdad.
+# Check inside the build stage itself: if pruning removed something essential,
+# the build fails here instead of producing a broken image. The modules the
+# project actually relies on are imported.
 RUN /opt/bin/pepe \
-    && /opt/tools/pepe/bin/python -c "import ssl, httpx, encodings, sysconfig; print('poda verificada')"
+    && /opt/tools/pepe/bin/python -c "import ssl, httpx, encodings, sysconfig; print('pruning verified')"
 
 ##############################################
-# Etapa 2: imagen final distroless
+# Stage 2: final distroless image
 ##############################################
-# cc-debian12 aporta glibc, libgcc y libssl, que son las dependencias
-# dinámicas del intérprete standalone. La variante :static no funcionaría.
+# cc-debian12 provides glibc, libgcc and libssl, which are the standalone
+# interpreter's dynamic dependencies. The :static variant would not work.
 FROM gcr.io/distroless/cc-debian12:nonroot
 
-# Intérprete gestionado por uv.
+# The uv-managed interpreter.
 COPY --from=builder /opt/python /opt/python
-# Entorno virtual de la herramienta (incluye httpx y el propio proyecto).
+# The tool's virtual environment (includes httpx and the project itself).
 COPY --from=builder /opt/tools /opt/tools
-# Lanzadores ejecutables (bin/pepe).
+# The executable launchers (bin/pepe).
 COPY --from=builder /opt/bin /opt/bin
 
-# El lanzador de /opt/bin es un script con shebang; en distroless no hay
-# intérprete de shell, pero el shebang apunta directamente al python del
-# entorno virtual, por lo que el kernel lo resuelve sin necesidad de sh.
+# The launcher in /opt/bin is a script with a shebang; distroless has no shell
+# interpreter, but the shebang points straight at the virtual environment's
+# python, so the kernel resolves it without needing sh.
 ENV PATH="/opt/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

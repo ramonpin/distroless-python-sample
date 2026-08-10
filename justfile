@@ -2,44 +2,46 @@ IMAGE := "pepe"
 TAG := "latest"
 PYTHON_VERSION := "3.13.7"
 
-# Lista las recetas disponibles.
+# List the available recipes.
 default:
     @just --list
 
-# Construye la imagen.
+# Build the image.
 build:
     docker build \
         --build-arg PYTHON_VERSION={{PYTHON_VERSION}} \
         -t {{IMAGE}}:{{TAG}} .
 
-# Construye sin usar la caché de capas.
+# Build without using the layer cache.
 rebuild:
     docker build --no-cache \
         --build-arg PYTHON_VERSION={{PYTHON_VERSION}} \
         -t {{IMAGE}}:{{TAG}} .
 
-# Ejecuta la herramienta en un contenedor. Acepta argumentos: just run --help
+# Run the tool in a container. Takes arguments: just run --help
 run *ARGS:
     docker run --rm {{IMAGE}}:{{TAG}} {{ARGS}}
 
-# Comprueba que el punto de entrada arranca y devuelve la salida esperada.
+# Check that the entry point starts and prints the expected output.
 test-entrypoint:
     #!/usr/bin/env bash
+    # The expected string must match main.py; changing the greeting in one
+    # place without the other makes this check fail.
     set -euo pipefail
-    salida="$(docker run --rm {{IMAGE}}:{{TAG}})"
-    echo "${salida}"
-    if [[ "${salida}" != "Hola mundo!!" ]]; then
-        echo "FALLO: salida inesperada del punto de entrada" >&2
+    output="$(docker run --rm {{IMAGE}}:{{TAG}})"
+    echo "${output}"
+    if [[ "${output}" != "Hello world!!" ]]; then
+        echo "FAIL: unexpected output from the entry point" >&2
         exit 1
     fi
-    echo "OK: punto de entrada"
+    echo "OK: entry point"
 
-# Comprueba que el intérprete y las dependencias nativas (SSL) funcionan.
+# Check that the interpreter and its native dependencies (SSL) work.
 test-deps:
     #!/usr/bin/env bash
-    # Esta es la prueba que de verdad valida la imagen distroless: si faltara
-    # alguna biblioteca dinámica o los certificados, fallaría aquí y no en el
-    # punto de entrada.
+    # This is the check that really validates the distroless image: a missing
+    # shared library or missing certificates would fail here, not at the
+    # entry point.
     set -euo pipefail
     docker run --rm --entrypoint /opt/tools/pepe/bin/python {{IMAGE}}:{{TAG}} -c '
     import ssl, sys
@@ -49,90 +51,90 @@ test-deps:
     print(ssl.OPENSSL_VERSION)
     r = httpx.get("https://example.com")
     assert r.status_code == 200, r.status_code
-    print("peticion HTTPS:", r.status_code)
+    print("HTTPS request:", r.status_code)
     '
-    echo "OK: interprete y dependencias"
+    echo "OK: interpreter and dependencies"
 
-# Comprueba que la poda del Dockerfile no ha roto la biblioteca estándar.
+# Check that the Dockerfile pruning did not break the standard library.
 test-stdlib:
     #!/usr/bin/env bash
     set -euo pipefail
     docker run --rm --entrypoint /opt/tools/pepe/bin/python {{IMAGE}}:{{TAG}} -c '
     import importlib
-    modulos = ["venv", "pydoc", "sqlite3", "ssl", "ctypes", "multiprocessing",
+    modules = ["venv", "pydoc", "sqlite3", "ssl", "ctypes", "multiprocessing",
                "asyncio", "xml.etree.ElementTree", "concurrent.futures",
                "http.server", "logging.handlers", "pickle", "socket",
                "subprocess", "tempfile", "uuid", "zoneinfo", "decimal",
                "lzma", "bz2", "zlib", "hashlib", "email", "unittest"]
-    roto = []
-    for m in modulos:
+    broken = []
+    for m in modules:
         try:
             importlib.import_module(m)
         except Exception as e:
-            roto.append(f"{m}: {type(e).__name__}: {e}")
-    if roto:
-        raise SystemExit("modulos rotos por la poda:\n" + "\n".join(roto))
-    print(f"{len(modulos)} modulos importados sin error")
+            broken.append(f"{m}: {type(e).__name__}: {e}")
+    if broken:
+        raise SystemExit("modules broken by pruning:\n" + "\n".join(broken))
+    print(f"{len(modules)} modules imported without error")
     '
-    echo "OK: biblioteca estandar intacta"
+    echo "OK: standard library intact"
 
-# Ejecuta todas las comprobaciones. Requiere red para test-deps.
+# Run every check. test-deps requires network access.
 test: test-entrypoint test-deps test-stdlib
-    @echo "OK: todas las comprobaciones"
+    @echo "OK: all checks"
 
-# Construye y comprueba de una pasada.
+# Build and check in one go.
 verify: build test
 
-# Construye sin la poda de tamaño, para comparar.
+# Build without the size pruning, for comparison.
 build-unpruned:
     docker build \
         --build-arg PYTHON_VERSION={{PYTHON_VERSION}} \
         --build-arg PRUNE=0 \
         -t {{IMAGE}}:unpruned .
 
-# Compara el tamaño con y sin poda.
+# Compare the size with and without pruning.
 compare: build build-unpruned
     @docker images {{IMAGE}} --format '{{{{.Tag}}\t{{{{.Size}}' | grep -E 'latest|unpruned'
 
-# Muestra el tamaño de la imagen y sus capas.
+# Show the image size and its layers.
 size:
-    @docker images {{IMAGE}}:{{TAG}} --format 'imagen: {{{{.Size}}'
+    @docker images {{IMAGE}}:{{TAG}} --format 'image: {{{{.Size}}'
     @docker history {{IMAGE}}:{{TAG}} --human --format '{{{{.Size}}\t{{{{.CreatedBy}}' | head -20
 
-# Abre una shell en la etapa de construcción (la imagen final no tiene shell).
+# Open a shell in the build stage (the final image has no shell).
 debug:
     docker build --target builder -t {{IMAGE}}:builder .
     docker run --rm -it --entrypoint /bin/bash {{IMAGE}}:builder
 
-# Elimina todas las imágenes del proyecto, cualquiera que sea su etiqueta.
+# Remove every image belonging to this project, whatever its tag.
 clean:
     #!/usr/bin/env bash
-    # Las imágenes se descubren por repositorio en lugar de enumerar etiquetas
-    # a mano: así no hay que actualizar esta receta cada vez que otra genere
-    # una etiqueta nueva (latest, builder, unpruned...). El filtro 'reference'
-    # compara el repositorio completo, por lo que no toca imágenes de nombre
-    # parecido como 'otropepe' o 'pepe-otroproyecto'.
+    # Images are discovered by repository instead of enumerating tags by hand,
+    # so this recipe needs no update whenever another one produces a new tag
+    # (latest, builder, unpruned...). The 'reference' filter matches the whole
+    # repository name, so it leaves similarly named images such as
+    # 'otherpepe' or 'pepe-otherproject' alone.
     set -euo pipefail
-    imagenes="$(docker images --filter reference='{{IMAGE}}' --format '{{{{.Repository}}:{{{{.Tag}}' | grep -v '<none>' || true)"
-    if [[ -z "${imagenes}" ]]; then
-        echo "no hay imagenes de {{IMAGE}} que borrar"
+    images="$(docker images --filter reference='{{IMAGE}}' --format '{{{{.Repository}}:{{{{.Tag}}' | grep -v '<none>' || true)"
+    if [[ -z "${images}" ]]; then
+        echo "no {{IMAGE}} images to remove"
     else
-        echo "${imagenes}" | xargs -r docker rmi -f
+        echo "${images}" | xargs -r docker rmi -f
     fi
 
-# Elimina las imágenes y, tras confirmar, TODA la caché de BuildKit del equipo.
+# Remove the images and, once confirmed, the machine's WHOLE BuildKit cache.
 clean-all: clean
     #!/usr/bin/env bash
-    # No se puede acotar el prune a este proyecto: BuildKit indexa la caché por
-    # hash de capa, sin vincularla a un repositorio, y las capas de imágenes
-    # base se comparten entre proyectos. Por eso se pide confirmación y se
-    # muestra antes cuánto espacio está en juego, en lugar de usar --force.
+    # The prune cannot be scoped to this project: BuildKit indexes the cache by
+    # layer hash with no link to a repository, and base-image layers are shared
+    # across projects. Hence the confirmation prompt and the size report up
+    # front, rather than just passing --force.
     set -euo pipefail
     docker buildx du 2>/dev/null | tail -3 || true
     echo
-    echo "Esto borrara la cache de construccion de TODOS los proyectos del equipo."
-    read -r -p "Continuar? [s/N] " respuesta
-    case "${respuesta}" in
-        s|S|si|SI|y|Y) docker builder prune --force ;;
-        *) echo "cancelado; las imagenes de {{IMAGE}} si se han borrado" ;;
+    echo "This will clear the build cache of EVERY project on this machine."
+    read -r -p "Continue? [y/N] " answer
+    case "${answer}" in
+        y|Y|yes|YES) docker builder prune --force ;;
+        *) echo "cancelled; the {{IMAGE}} images were removed" ;;
     esac
