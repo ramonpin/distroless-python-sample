@@ -59,7 +59,7 @@ RUN set -eu; \
     if [ "${PRUNE}" != "1" ]; then echo "poda omitida"; exit 0; fi; \
     PY_ROOT="$(dirname "$(dirname "$(readlink -f /opt/tools/pepe/bin/python)")")"; \
     cd "${PY_ROOT}"; \
-    rm -f lib/libpython3.13.so.1.0 lib/libpython3.so; \
+    rm -f lib/libpython3*.so lib/libpython3*.so.*; \
     rm -rf lib/tcl* lib/tk* lib/thread* lib/itcl* \
            lib/libtcl* lib/libtk* \
            lib/python3.13/tkinter lib/python3.13/idlelib \

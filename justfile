@@ -104,6 +104,35 @@ debug:
     docker build --target builder -t {{IMAGE}}:builder .
     docker run --rm -it --entrypoint /bin/bash {{IMAGE}}:builder
 
-# Elimina las imágenes generadas.
+# Elimina todas las imágenes del proyecto, cualquiera que sea su etiqueta.
 clean:
-    -docker rmi {{IMAGE}}:{{TAG}} {{IMAGE}}:builder
+    #!/usr/bin/env bash
+    # Las imágenes se descubren por repositorio en lugar de enumerar etiquetas
+    # a mano: así no hay que actualizar esta receta cada vez que otra genere
+    # una etiqueta nueva (latest, builder, unpruned...). El filtro 'reference'
+    # compara el repositorio completo, por lo que no toca imágenes de nombre
+    # parecido como 'otropepe' o 'pepe-otroproyecto'.
+    set -euo pipefail
+    imagenes="$(docker images --filter reference='{{IMAGE}}' --format '{{{{.Repository}}:{{{{.Tag}}' | grep -v '<none>' || true)"
+    if [[ -z "${imagenes}" ]]; then
+        echo "no hay imagenes de {{IMAGE}} que borrar"
+    else
+        echo "${imagenes}" | xargs -r docker rmi -f
+    fi
+
+# Elimina las imágenes y, tras confirmar, TODA la caché de BuildKit del equipo.
+clean-all: clean
+    #!/usr/bin/env bash
+    # No se puede acotar el prune a este proyecto: BuildKit indexa la caché por
+    # hash de capa, sin vincularla a un repositorio, y las capas de imágenes
+    # base se comparten entre proyectos. Por eso se pide confirmación y se
+    # muestra antes cuánto espacio está en juego, en lugar de usar --force.
+    set -euo pipefail
+    docker buildx du 2>/dev/null | tail -3 || true
+    echo
+    echo "Esto borrara la cache de construccion de TODOS los proyectos del equipo."
+    read -r -p "Continuar? [s/N] " respuesta
+    case "${respuesta}" in
+        s|S|si|SI|y|Y) docker builder prune --force ;;
+        *) echo "cancelado; las imagenes de {{IMAGE}} si se han borrado" ;;
+    esac

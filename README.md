@@ -25,8 +25,9 @@ interesante aquí es la construcción de la imagen, no el código.
 | `pyproject.toml` | Metadatos, dependencia de `httpx` y el script `pepe = main:main`. |
 | `uv.lock`        | Versiones exactas resueltas por `uv`.                            |
 | `Dockerfile`     | Construcción en dos etapas hacia una imagen distroless.          |
-| `justfile`       | Recetas para construir y comprobar la imagen.                    |
+| `justfile`       | Recetas para construir, comprobar y limpiar.                     |
 | `.dockerignore`  | Excluye `.venv/` y otros artefactos del contexto de construcción. |
+| `README.md`      | Este documento.                                                  |
 
 ## Requisitos
 
@@ -44,8 +45,22 @@ just test      # comprueba la imagen (requiere red)
 just verify    # construye y comprueba de una pasada
 just size      # tamaño y desglose por capas
 just compare   # tamaño con y sin la poda
+just clean     # borra las imágenes del proyecto
 just --list    # todas las recetas disponibles
 ```
+
+`just clean` descubre las imágenes por repositorio, así que se lleva todas las
+etiquetas que generan las recetas (`latest`, `builder`, `unpruned`) sin tener
+que enumerarlas. No toca imágenes de otros proyectos, ni siquiera con nombres
+parecidos como `pepe-otro`.
+
+Existe también `just clean-all`, pero conviene saber qué hace antes de usarla:
+además de las imágenes, borra la caché de construcción de BuildKit **de todos
+los proyectos del equipo**, no solo la de este. No es una limitación de la
+receta, sino de BuildKit: la caché se indexa por hash de capa, sin vínculo con
+un repositorio, y las capas de las imágenes base se comparten entre proyectos.
+Por eso la receta muestra cuánto espacio está en juego y pide confirmación
+explícita. Si solo quieres dejar limpio este proyecto, usa `just clean`.
 
 Sin `just`:
 
@@ -115,7 +130,8 @@ requiere acceso a la red; para comprobar sin red, usa `just test-entrypoint`.
 ## Tamaño de la imagen
 
 Unos **90 MB**, frente a los 143 MB que ocupa sin podar. Casi todo lo que queda
-es el intérprete y su biblioteca estándar en `/opt/python`.
+es el intérprete y su biblioteca estándar en `/opt/python`, que pasa de 123 MB a
+66 MB.
 
 La poda va en la primera etapa del `Dockerfile`, antes de las copias, y se puede
 desactivar con `--build-arg PRUNE=0` (o `just build-unpruned`). Reparto del
@@ -127,6 +143,7 @@ ahorro, medido sobre esta imagen:
 | `tcl/tk`, `tkinter`, `idlelib`   |  13 MB | Interfaz gráfica: no hay servidor X |
 | `share/terminfo`                 |   8 MB | No hay terminal interactiva         |
 | `include/`, `.a`, `config-*`     |   4 MB | Solo para compilar extensiones      |
+| `share/man`, `pkgconfig`         |  ~1 MB | Documentación y metadatos de enlace |
 | `ensurepip`, `pip`               |   2 MB | La imagen final es inmutable        |
 
 El grande merece explicación: `libpython3.13.so.1.0` es una **segunda copia
